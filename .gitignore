@@ -1,6 +1,48 @@
-data/images/
-data/xml/
-runs/
+# Python
 __pycache__/
-*.pt
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Flask
+instance/
+.webassets-cache
+
+# Uploads
+static/uploads/*
+!static/uploads/.gitkeep
+
+# Data
+data/UFPR04/images/
+data/UFPR04/xml/
+data.zip
+
+# Models (optional - uncomment if models are large)
+# models/*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+runs/
+
+# Environment
+.env
+.env.local
 
