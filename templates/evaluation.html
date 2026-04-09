@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ParkEzy — Model Evaluation</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f0f2f7; min-height: 100vh; }
+
+        nav {
+            background: #1f2a44; padding: 0 28px;
+            display: flex; align-items: center; justify-content: space-between; height: 58px;
+        }
+        nav .brand { color: #fff; font-size: 1.25rem; font-weight: 700; letter-spacing: 1px; }
+        nav a {
+            color: rgba(255,255,255,0.7); text-decoration: none; font-size: 0.9rem;
+            padding: 7px 16px; border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px; transition: all 0.2s; margin-left: 10px;
+        }
+        nav a:hover { background: rgba(255,255,255,0.1); color: #fff; }
+        nav a.active { background: rgba(255,255,255,0.18); color: #fff; }
+
+        .page { max-width: 1200px; margin: 0 auto; padding: 28px 20px; }
+
+        /* ── Run panel ── */
+        .run-panel {
+            background: #fff; border-radius: 14px; padding: 32px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+            text-align: center; margin-bottom: 28px;
+        }
+        .run-panel h2 { color: #1f2a44; margin-bottom: 10px; }
+        .run-panel p  { color: #666; font-size: 0.9rem; margin-bottom: 22px; line-height: 1.6; }
+
+        .btn-run {
+            padding: 13px 40px; background: linear-gradient(135deg, #667eea, #764ba2);
+            color: #fff; border: none; border-radius: 8px;
+            font-size: 1rem; cursor: pointer; transition: all 0.2s;
+        }
+        .btn-run:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
+        .btn-run:disabled { background: #ccc; cursor: not-allowed; }
+
+        /* ── Progress ── */
+        .progress-wrap { display: none; margin-top: 20px; }
+        .progress-wrap.active { display: block; }
+        .progress-bar-bg {
+            background: #eee; border-radius: 8px; height: 10px; overflow: hidden; margin-bottom: 8px;
+        }
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #667eea, #764ba2); width: 0%; transition: width 0.4s; border-radius: 8px; }
+        .progress-label { font-size: 0.85rem; color: #888; }
+
+        /* ── Metric Cards ── */
+        .metrics-grid {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 16px; margin-bottom: 28px;
+        }
+        .metric-card {
+            background: #fff; border-radius: 12px; padding: 22px 16px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+            text-align: center; border-top: 4px solid #667eea;
+        }
+        .metric-card.green { border-top-color: #38ef7d; }
+        .metric-card.amber { border-top-color: #f7b731; }
+        .metric-card.red   { border-top-color: #ee0979; }
+        .metric-card .num  { font-size: 2.2rem; font-weight: 700; color: #1f2a44; }
+        .metric-card .lbl  { font-size: 0.78rem; color: #888; margin-top: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .metric-card .sub  { font-size: 0.72rem; color: #bbb; margin-top: 3px; }
+
+        /* ── Confusion Matrix ── */
+        .cm-wrap {
+            background: #fff; border-radius: 12px; padding: 24px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.07); margin-bottom: 28px;
+        }
+        .cm-title { font-size: 1rem; font-weight: 600; color: #1f2a44; margin-bottom: 18px; }
+        .cm-grid {
+            display: grid; grid-template-columns: auto 1fr 1fr;
+            gap: 4px; max-width: 380px; margin: 0 auto;
+        }
+        .cm-cell {
+            padding: 18px 12px; border-radius: 8px;
+            text-align: center; font-weight: 600; font-size: 1.1rem;
+        }
+        .cm-header { background: none; font-size: 0.78rem; color: #888; font-weight: 500; display: flex; align-items: center; justify-content: center; }
+        .cm-tp { background: #d4edda; color: #155724; }
+        .cm-fp { background: #f8d7da; color: #721c24; }
+        .cm-fn { background: #fff3cd; color: #856404; }
+        .cm-tn { background: #d4edda; color: #155724; }
+        .cm-sub { font-size: 0.7rem; font-weight: 400; margin-top: 3px; opacity: 0.8; }
+
+        /* ── Charts + Table ── */
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px; }
+        .chart-card {
+            background: #fff; border-radius: 12px; padding: 22px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+        }
+        .chart-card.full { grid-column: 1 / -1; }
+        .chart-title    { font-size: 1rem; font-weight: 600; color: #1f2a44; margin-bottom: 4px; }
+        .chart-subtitle { font-size: 0.78rem; color: #aaa; margin-bottom: 16px; }
+
+        /* ── Slot Table ── */
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th {
+            background: #1f2a44; color: #fff; padding: 10px 14px;
+            text-align: left; font-weight: 500; font-size: 0.78rem;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        td { padding: 9px 14px; border-bottom: 1px solid #f0f0f0; color: #333; }
+        tr:hover td { background: #f8f9ff; }
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 0.75rem; font-weight: 600;
+        }
+        .badge-high   { background: #d4edda; color: #155724; }
+        .badge-medium { background: #fff3cd; color: #856404; }
+        .badge-low    { background: #f8d7da; color: #721c24; }
+
+        .results-section { display: none; }
+        .results-section.active { display: block; }
+
+        @media (max-width: 768px) {
+            .metrics-grid { grid-template-columns: 1fr 1fr; }
+            .charts-grid  { grid-template-columns: 1fr; }
+            .chart-card.full { grid-column: 1; }
+        }
+    </style>
+</head>
+<body>
+
+<nav>
+    <span class="brand">🅿 ParkEzy</span>
+    <div>
+        <a href="/">Live Detection</a>
+        <a href="/dashboard">Analytics</a>
+        <a href="/evaluation" class="active">Evaluation</a>
+    </div>
+</nav>
+
+<div class="page">
+
+    <!-- Run Panel -->
+    <div class="run-panel">
+        <h2>Model Accuracy Evaluation</h2>
+        <p>
+            Runs YOLOv8 detection on a representative sample of PKLot images and compares
+            predictions against the XML ground truth labels using IoU ≥ 0.3.<br>
+            Evaluates ~100 images sampled evenly across all dates and weather conditions.
+        </p>
+        <button class="btn-run" id="runBtn" onclick="runEval()">▶ Run Evaluation</button>
+
+        <div class="progress-wrap" id="progressWrap">
+            <div class="progress-bar-bg"><div class="progress-bar" id="progressBar"></div></div>
+            <div class="progress-label" id="progressLabel">Running YOLO on sample images…</div>
+        </div>
+    </div>
+
+    <!-- Results (hidden until eval runs) -->
+    <div class="results-section" id="resultsSection">
+
+        <!-- Metric Cards -->
+        <div class="metrics-grid">
+            <div class="metric-card green">
+                <div class="num" id="mAccuracy">—</div>
+                <div class="lbl">Accuracy</div>
+                <div class="sub">(TP+TN) / Total</div>
+            </div>
+            <div class="metric-card">
+                <div class="num" id="mPrecision">—</div>
+                <div class="lbl">Precision</div>
+                <div class="sub">TP / (TP+FP)</div>
+            </div>
+            <div class="metric-card amber">
+                <div class="num" id="mRecall">—</div>
+                <div class="lbl">Recall</div>
+                <div class="sub">TP / (TP+FN)</div>
+            </div>
+            <div class="metric-card red">
+                <div class="num" id="mF1">—</div>
+                <div class="lbl">F1 Score</div>
+                <div class="sub">Harmonic mean P&R</div>
+            </div>
+        </div>
+
+        <!-- Confusion Matrix + Sample Info -->
+        <div class="charts-grid">
+            <div class="chart-card">
+                <div class="chart-title">Confusion Matrix</div>
+                <div class="chart-subtitle" id="evalMeta"></div>
+                <div class="cm-grid">
+                    <div class="cm-header"></div>
+                    <div class="cm-header">Predicted Occupied</div>
+                    <div class="cm-header">Predicted Vacant</div>
+                    <div class="cm-header">Actual Occupied</div>
+                    <div class="cm-cell cm-tp" id="cmTP">—<div class="cm-sub">True Positive</div></div>
+                    <div class="cm-cell cm-fn" id="cmFN">—<div class="cm-sub">False Negative</div></div>
+                    <div class="cm-header">Actual Vacant</div>
+                    <div class="cm-cell cm-fp" id="cmFP">—<div class="cm-sub">False Positive</div></div>
+                    <div class="cm-cell cm-tn" id="cmTN">—<div class="cm-sub">True Negative</div></div>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-title">Per-Slot Accuracy Distribution</div>
+                <div class="chart-subtitle">How accurately each slot is classified</div>
+                <canvas id="slotAccChart" height="240"></canvas>
+            </div>
+        </div>
+
+        <!-- Slot Utilization + Accuracy Table -->
+        <div class="chart-card full" style="margin-bottom:0">
+            <div class="chart-title">Slot-Level Utilization & Accuracy</div>
+            <div class="chart-subtitle">Ground truth occupancy frequency and per-slot detection accuracy</div>
+            <div class="table-wrap">
+                <table id="slotTable">
+                    <thead>
+                        <tr>
+                            <th>Slot ID</th>
+                            <th>GT Occupied %</th>
+                            <th>Utilization</th>
+                            <th>Accuracy %</th>
+                            <th>Performance</th>
+                            <th>TP</th><th>FP</th><th>TN</th><th>FN</th>
+                        </tr>
+                    </thead>
+                    <tbody id="slotTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+    let evaluated = false;
+
+    async function runEval() {
+        if (evaluated) return;
+
+        const btn = document.getElementById('runBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳ Running…';
+
+        const progressWrap = document.getElementById('progressWrap');
+        const progressBar  = document.getElementById('progressBar');
+        const progressLabel = document.getElementById('progressLabel');
+
+        progressWrap.classList.add('active');
+
+        // Animate progress bar while waiting
+        let pct = 0;
+        const ticker = setInterval(() => {
+            pct = Math.min(pct + 1.2, 90);
+            progressBar.style.width = pct + '%';
+        }, 400);
+
+        try {
+            const res  = await fetch('/api/run_evaluation');
+            const data = await res.json();
+
+            clearInterval(ticker);
+            progressBar.style.width = '100%';
+            progressLabel.textContent = 'Complete!';
+
+            showResults(data);
+            evaluated = true;
+            btn.textContent = '✓ Evaluation Complete';
+
+        } catch (err) {
+            clearInterval(ticker);
+            progressLabel.textContent = 'Error: ' + err.message;
+            btn.disabled = false;
+            btn.textContent = '▶ Run Evaluation';
+        }
+    }
+
+    function showResults(data) {
+        // Metric cards
+        document.getElementById('mAccuracy').textContent  = data.accuracy  + '%';
+        document.getElementById('mPrecision').textContent = data.precision + '%';
+        document.getElementById('mRecall').textContent    = data.recall    + '%';
+        document.getElementById('mF1').textContent        = data.f1_score  + '%';
+
+        // Confusion matrix
+        document.getElementById('cmTP').innerHTML = data.tp + '<div class="cm-sub">True Positive</div>';
+        document.getElementById('cmFP').innerHTML = data.fp + '<div class="cm-sub">False Positive</div>';
+        document.getElementById('cmFN').innerHTML = data.fn + '<div class="cm-sub">False Negative</div>';
+        document.getElementById('cmTN').innerHTML = data.tn + '<div class="cm-sub">True Negative</div>';
+
+        document.getElementById('evalMeta').textContent =
+            `${data.images_evaluated} images evaluated · ${data.total_predictions} slot predictions`;
+
+        // Per-slot accuracy chart
+        const slots = data.per_slot;
+        new Chart(document.getElementById('slotAccChart'), {
+            type: 'bar',
+            data: {
+                labels: slots.map(s => 'S' + s.slot_id),
+                datasets: [{
+                    label: 'Accuracy (%)',
+                    data: slots.map(s => s.accuracy),
+                    backgroundColor: slots.map(s =>
+                        s.accuracy >= 80 ? 'rgba(56,239,125,0.8)' :
+                        s.accuracy >= 60 ? 'rgba(247,183,49,0.8)' :
+                                           'rgba(238,9,121,0.8)'
+                    ),
+                    borderRadius: 4,
+                }]
+            },
+            options: {
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, max: 100, ticks: { callback: v => v + '%' } },
+                    x: { ticks: { font: { size: 10 } } }
+                }
+            }
+        });
+
+        // Slot table
+        const tbody = document.getElementById('slotTableBody');
+        tbody.innerHTML = '';
+        slots.forEach(s => {
+            const utilBadge = s.gt_occupied_pct >= 70 ? 'badge-high' :
+                              s.gt_occupied_pct >= 40 ? 'badge-medium' : 'badge-low';
+            const utilLabel = s.gt_occupied_pct >= 70 ? 'High' :
+                              s.gt_occupied_pct >= 40 ? 'Medium' : 'Low';
+            const perfBadge = s.accuracy >= 80 ? 'badge-high' :
+                              s.accuracy >= 60 ? 'badge-medium' : 'badge-low';
+            const perfLabel = s.accuracy >= 80 ? 'Good' :
+                              s.accuracy >= 60 ? 'Fair' : 'Poor';
+
+            tbody.innerHTML += `
+                <tr>
+                    <td><strong>${s.slot_id}</strong></td>
+                    <td>${s.gt_occupied_pct}%</td>
+                    <td><span class="badge ${utilBadge}">${utilLabel}</span></td>
+                    <td>${s.accuracy}%</td>
+                    <td><span class="badge ${perfBadge}">${perfLabel}</span></td>
+                    <td>${s.tp}</td><td>${s.fp}</td><td>${s.tn}</td><td>${s.fn}</td>
+                </tr>`;
+        });
+
+        document.getElementById('resultsSection').classList.add('active');
+        document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
+    }
+</script>
+
+</body>
+</html>
