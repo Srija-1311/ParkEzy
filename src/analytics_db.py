@@ -30,6 +30,12 @@ def init_db():
             tp INTEGER, fp INTEGER, tn INTEGER, fn INTEGER
         )
     """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS frame_data (
+        frame INTEGER,
+        available INTEGER
+    )
+""")
     conn.commit()
     conn.close()
 
@@ -81,3 +87,20 @@ def get_slot_utilization():
          "tp": r[3], "fp": r[4], "tn": r[5], "fn": r[6]}
         for r in rows
     ]
+
+def save_frame_data(frame_id, available):
+    conn = sqlite3.connect(DB_PATH)   # ✅ FIX
+    c = conn.cursor()
+
+    c.execute(
+        "INSERT INTO frame_data (frame, available) VALUES (?, ?)",
+        (frame_id, available)
+    )
+
+    conn.commit()
+    conn.close()
+def clear_frame_data():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM frame_data")
+    conn.commit()
+    conn.close()
