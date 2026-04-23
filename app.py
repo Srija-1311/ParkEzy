@@ -1,182 +1,356 @@
 import os
 import io
 import csv
+import json
 import sqlite3
-import cv2
 
-from flask import Flask, render_template, request, jsonify, Response
+import cv2
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from werkzeug.utils import secure_filename
 
-from src.analytics_db import init_db, log_occupancy, get_slot_utilization
+from src.analytics_db import (
+    init_db, log_occupancy, save_frame_data, clear_frame_data,
+    save_slot_utilization, get_slot_utilization
+)
 from src.detect_cars import CarDetector
 from src.occupancy import OccupancyDetector
-from src.slot_utils import load_slots
+from src.slot_utils import load_slots, save_slots
 from src.visualize import draw_results
-from tools.annotate_slots import annotate
-from src.video_processor import process_video
+from src.video_processor import process_video_stream
+from src.evaluate import run_evaluation
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 init_db()
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = "static/uploads"
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+app.config['UPLOAD_FOLDER']      = "static/uploads"
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024   # 500 MB
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs("data/slots", exist_ok=True)
+os.makedirs("static/frames", exist_ok=True)
 
 car_detector = CarDetector("models/yolov8n.pt")
 
-ALLOWED = {'png', 'jpg', 'jpeg', 'mp4', 'avi', 'mov'}
+ALLOWED_IMAGE = {'png', 'jpg', 'jpeg'}
+ALLOWED_VIDEO = {'mp4', 'avi', 'mov', 'mkv'}
+ALLOWED_ALL   = ALLOWED_IMAGE | ALLOWED_VIDEO
+
+DEFAULT_SLOTS = "data/UFPR04/slots.json"
+
+_eval_cache = None
 
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED
+def file_ext(filename):
+    return filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+
+
+def slot_path_for(stem):
+    return f"data/slots/{stem}.json"
 
 
 def get_db():
     return sqlite3.connect("data/analytics.db")
 
 
-# ── IMAGE ───────────────────────────────────────
-
-def process_image_api(path, new_lot):
-    filename = os.path.basename(path).split('.')[0]
-    slot_path = f"data/slots/{filename}.json"
-
-    if new_lot:
-        annotate(path)
-
-    if not os.path.exists(slot_path):
-        slot_path = "data/slots/frame.json"
-
-    slots = load_slots(slot_path)
-    occupancy_detector = OccupancyDetector(slots)
-
-    frame = cv2.imread(path)
-
-    boxes = car_detector.detect(frame)
-    predictions = occupancy_detector.predict(boxes)
-
-    total = len(predictions)
-    occupied = sum(predictions.values())
-    vacant = total - occupied
-    rate = round((occupied / total) * 100, 2) if total else 0
-
-    log_occupancy(occupied, vacant)
-
-    output = draw_results(frame, slots, predictions)
-
-    output_path = os.path.join(app.config['UPLOAD_FOLDER'], "output.jpg")
-    cv2.imwrite(output_path, output)
-
-    return jsonify({
-        "success": True,
-        "image_path": output_path,
-        "total_slots": total,
-        "vacant": vacant,
-        "occupied": occupied,
-        "occupancy_rate": rate
-    })
-
-
-# ── VIDEO ───────────────────────────────────────
-
-def process_video_api(path, new_lot):
-    filename = os.path.basename(path).split('.')[0]
-    from src.analytics_db import clear_frame_data
-
-    clear_frame_data()
-    slot_path = f"data/slots/{filename}.json"
-
-    cap = cv2.VideoCapture(path)
-
-    ret, frame = cap.read()
-    if not ret:
-        return jsonify({"success": False, "error": "Cannot read video"})
-
-    temp_frame = "static/frame.jpg"
-    cv2.imwrite(temp_frame, frame)
-
-    if new_lot:
-        annotate(temp_frame)
-
-    cap.release()
-
-    if not os.path.exists(slot_path):
-        slot_path = "data/slots/frame.json"
-
-    results, sample_frames = process_video(path)
-
-    if len(results) > 0:
-        avg_available = sum([r["available"] for r in results]) // len(results)
-    else:
-        avg_available = 0
-
-    return jsonify({
-        "success": True,
-        "total_slots": "Video Mode",
-        "vacant": avg_available,
-        "occupied": "Processed",
-        "occupancy_rate": "Frame-wise",
-        "frames": sample_frames
-    })
-
-
-# ── ROUTES ───────────────────────────────────────
+# ── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
+@app.route("/dashboard")
+def dashboard():
+    return render_template("dashboard.html")
+
+
+@app.route("/evaluation")
+def evaluation_page():
+    return render_template("evaluation.html")
+
+
+# ── Slot annotation ───────────────────────────────────────────────────────────
+
+@app.route("/save_slots", methods=["POST"])
+def save_slots_route():
+    data     = request.get_json()
+    lot_name = (data.get("lot_name") or "").strip()
+    polygons = data.get("slots", [])
+
+    if not lot_name:
+        return jsonify({"success": False, "error": "lot_name is required"}), 400
+    if not polygons:
+        return jsonify({"success": False, "error": "No slots provided"}), 400
+
+    path = slot_path_for(lot_name)
+    save_slots(path, polygons)
+    return jsonify({"success": True, "saved": len(polygons), "path": path})
+
+
+@app.route("/get_slots/<lot_name>")
+def get_slots_route(lot_name):
+    path = slot_path_for(lot_name)
+    if not os.path.exists(path):
+        return jsonify({"slots": []})
+    with open(path) as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        data = list(data.values())
+    return jsonify({"slots": data})
+
+
+# ── Image upload & detect ─────────────────────────────────────────────────────
+
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
         file = request.files.get("file")
-
         if not file or file.filename == "":
-            return jsonify({"success": False, "error": "No file uploaded"})
-
-        if not allowed_file(file.filename):
-            return jsonify({"success": False, "error": "Unsupported file type"})
+            return jsonify({"success": False, "error": "No file uploaded"}), 400
 
         filename = secure_filename(file.filename)
+        ext      = file_ext(filename)
+
+        if ext not in ALLOWED_ALL:
+            return jsonify({"success": False, "error": "Unsupported file type"}), 400
+
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
 
-        ext = filename.rsplit('.', 1)[1].lower()
-        new_lot = request.form.get("new_lot")
+        # lot_name is sent by the frontend when the user typed a name in the
+        # "New Parking Lot" field.  If absent, fall back to the image stem.
+        lot_name = (request.form.get("lot_name") or "").strip()
+        stem     = filename.rsplit('.', 1)[0]
 
-        if ext in ["jpg", "jpeg", "png"]:
-            return process_image_api(filepath, new_lot)
-
-        elif ext in ["mp4", "avi", "mov"]:
-            return process_video_api(filepath, new_lot)
-
+        # Priority: explicit lot_name → image stem → UFPR04 default
+        if lot_name and os.path.exists(slot_path_for(lot_name)):
+            use_slots = slot_path_for(lot_name)
+        elif os.path.exists(slot_path_for(stem)):
+            use_slots = slot_path_for(stem)
         else:
-            return jsonify({"success": False, "error": "Invalid file type"})
+            use_slots = DEFAULT_SLOTS
+
+        if ext in ALLOWED_IMAGE:
+            return _detect_image(filepath, use_slots)
+
+        # Video: pass slot path so SSE stream can use it
+        return jsonify({
+            "success":    True,
+            "mode":       "video",
+            "filepath":   filepath,
+            "filename":   filename,
+            "slot_path":  use_slots
+        })
 
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
-# ── ANALYTICS GRAPH ─────────────────────────────
+def _detect_image(filepath, slot_path):
+    img = cv2.imread(filepath)
+    if img is None:
+        return jsonify({"success": False, "error": "Cannot read image"}), 400
 
-@app.route("/analytics-data")
-def analytics_data():
-    conn = sqlite3.connect("data/analytics.db")   # ✅ FIX
-    rows = conn.execute("SELECT frame, available FROM frame_data").fetchall()
-    conn.close()
+    slots              = load_slots(slot_path)
+    occupancy_detector = OccupancyDetector(slots)
 
-    frames = [r[0] for r in rows]
-    values = [r[1] for r in rows]
+    boxes       = car_detector.detect(img)
+    predictions = occupancy_detector.predict(boxes)
+
+    total    = len(predictions)
+    occupied = sum(predictions.values())
+    vacant   = total - occupied
+    rate     = round((occupied / total) * 100, 1) if total else 0
+
+    log_occupancy(occupied, vacant)
+
+    output   = draw_results(img, slots, predictions)
+    out_path = os.path.join(app.config['UPLOAD_FOLDER'], "output.jpg")
+    cv2.imwrite(out_path, output)
+
+    # Human-readable slot source label — show the lot name, not the full path
+    if slot_path == DEFAULT_SLOTS:
+        slots_used = "UFPR04 (default)"
+    else:
+        slots_used = os.path.basename(slot_path).replace(".json", "")
 
     return jsonify({
-        "frames": frames,
-        "values": values
+        "success":        True,
+        "mode":           "image",
+        "image_url":      "/" + out_path.replace("\\", "/"),
+        "total_slots":    total,
+        "occupied":       occupied,
+        "vacant":         vacant,
+        "occupancy_rate": rate,
+        "slots_used":     slots_used
     })
 
 
-# ── RUN ─────────────────────────────────────────
+# ── Video SSE stream ──────────────────────────────────────────────────────────
+
+@app.route("/stream_video")
+def stream_video():
+    """
+    SSE endpoint. Browser connects here after uploading a video.
+    Streams one JSON event per processed frame.
+    """
+    filepath  = request.args.get("filepath", "")
+    filename  = request.args.get("filename", "")
+    slot_path = request.args.get("slot_path", "")
+
+    if not filepath or not os.path.exists(filepath):
+        def err():
+            yield f'data: {json.dumps({"error":"File not found"})}\n\n'
+        return Response(stream_with_context(err()), mimetype="text/event-stream")
+
+    # Use the slot_path passed from /upload if valid, otherwise resolve here
+    if slot_path and os.path.exists(slot_path):
+        use_slots = slot_path
+    else:
+        stem      = filename.rsplit('.', 1)[0] if '.' in filename else filename
+        lot_name  = request.args.get("lot_name", "").strip()
+        if lot_name and os.path.exists(slot_path_for(lot_name)):
+            use_slots = slot_path_for(lot_name)
+        elif os.path.exists(slot_path_for(stem)):
+            use_slots = slot_path_for(stem)
+        else:
+            use_slots = DEFAULT_SLOTS
+
+    clear_frame_data()
+
+    return Response(
+        stream_with_context(process_video_stream(filepath, use_slots)),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+
+# ── Analytics APIs ────────────────────────────────────────────────────────────
+
+@app.route("/api/saved_lots")
+def saved_lots():
+    """Return list of saved parking lot names (slot JSON files in data/slots/)."""
+    files = [
+        f.replace(".json", "")
+        for f in os.listdir("data/slots")
+        if f.endswith(".json")
+    ]
+    return jsonify(sorted(files))
+
+
+@app.route("/api/current_status")
+def current_status():
+    conn = get_db()
+    row  = conn.execute("""
+        SELECT occupied, vacant, total, occupancy_rate
+        FROM occupancy_logs ORDER BY id DESC LIMIT 1
+    """).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({})
+    return jsonify({
+        "occupied": row[0], "vacant": row[1],
+        "total": row[2],
+        "occupancy_rate": round(row[3] * 100, 1)
+    })
+
+
+@app.route("/api/hourly_avg")
+def hourly_avg():
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    conn   = get_db()
+    q      = "SELECT hour, ROUND(AVG(occupancy_rate)*100,1) FROM occupancy_logs WHERE 1=1"
+    p      = []
+    if date_from: q += " AND date >= ?"; p.append(date_from)
+    if date_to:   q += " AND date <= ?"; p.append(date_to)
+    q += " GROUP BY hour ORDER BY hour"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return jsonify([{"hour": r[0], "avg_rate": r[1]} for r in rows])
+
+
+@app.route("/api/daily_trend")
+def daily_trend():
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    conn   = get_db()
+    q      = "SELECT date, ROUND(AVG(occupancy_rate)*100,1) FROM occupancy_logs WHERE 1=1"
+    p      = []
+    if date_from: q += " AND date >= ?"; p.append(date_from)
+    if date_to:   q += " AND date <= ?"; p.append(date_to)
+    q += " GROUP BY date ORDER BY date"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return jsonify([{"date": r[0], "avg_rate": r[1]} for r in rows])
+
+
+@app.route("/api/weather_stats")
+def weather_stats():
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    conn   = get_db()
+    q      = "SELECT weather, ROUND(AVG(occupancy_rate)*100,1), COUNT(*) FROM occupancy_logs WHERE weather != 'Unknown'"
+    p      = []
+    if date_from: q += " AND date >= ?"; p.append(date_from)
+    if date_to:   q += " AND date <= ?"; p.append(date_to)
+    q += " GROUP BY weather ORDER BY weather"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return jsonify([{"weather": r[0], "avg_rate": r[1], "count": r[2]} for r in rows])
+
+
+@app.route("/api/export_csv")
+def export_csv():
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    conn   = get_db()
+    q      = "SELECT timestamp, date, hour, weather, occupied, vacant, total, occupancy_rate FROM occupancy_logs WHERE 1=1"
+    p      = []
+    if date_from: q += " AND date >= ?"; p.append(date_from)
+    if date_to:   q += " AND date <= ?"; p.append(date_to)
+    q += " ORDER BY timestamp"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+
+    out = io.StringIO()
+    w   = csv.writer(out)
+    w.writerow(['Timestamp','Date','Hour','Weather','Occupied','Vacant','Total','Occupancy Rate (%)'])
+    for row in rows:
+        w.writerow([*row[:7], round(row[7] * 100, 2)])
+    out.seek(0)
+    return Response(out.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename=occupancy_report.csv'})
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+@app.route("/api/run_evaluation")
+def run_eval():
+    global _eval_cache
+    if _eval_cache is not None:
+        return jsonify(_eval_cache)
+    result      = run_evaluation(car_detector, iou_threshold=0.1, sample_step=38)
+    save_slot_utilization(result['per_slot'])
+    _eval_cache = result
+    return jsonify(_eval_cache)
+
+
+@app.route("/api/slot_utilization")
+def slot_utilization():
+    return jsonify(get_slot_utilization())
+
+
+# ── Error handlers ────────────────────────────────────────────────────────────
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({"success": False, "error": "File too large (max 500 MB)"}), 413
+
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # threaded=True is required for SSE to work alongside other requests
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)

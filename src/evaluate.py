@@ -40,7 +40,7 @@ def _iou(poly_a, poly_b):
     return inter / poly_a.union(poly_b).area
 
 
-def run_evaluation(detector, iou_threshold=0.3, sample_step=38):
+def run_evaluation(detector, iou_threshold=0.1, sample_step=38):
     """
     Evaluate YOLO detector against PKLot XML ground truth.
 

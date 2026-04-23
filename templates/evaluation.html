@@ -344,25 +344,5 @@
         document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth' });
     }
 </script>
-<canvas id="chart"></canvas>
-
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-<script>
-fetch('/analytics-data')
-.then(res => res.json())
-.then(data => {
-    new Chart(document.getElementById('chart'), {
-        type: 'line',
-        data: {
-            labels: data.frames,
-            datasets: [{
-                label: 'Available Slots',
-                data: data.values
-            }]
-        }
-    });
-});
-</script>
 </body>
 </html>

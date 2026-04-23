@@ -1,5 +1,5 @@
 flask==3.0.0
-ultralytics==8.1.0
+ultralytics==8.4.41
 opencv-python==4.9.0.80
 numpy==1.26.3
 shapely==2.0.2
