@@ -3,31 +3,29 @@ from ultralytics import YOLO
 
 class CarDetector:
     """
-    YOLOv8-based vehicle detector.
+    YOLO11x-based vehicle detector with high-resolution inference.
 
-    For standard side/front-view images, filters by vehicle COCO classes.
-    For aerial/top-down parking lot images, YOLO often misclassifies cars as
-    other objects (cell phone, bottle, etc.) due to the top-down perspective.
-    The OccupancyDetector handles this by using slot-first IoU matching —
-    any detection that significantly overlaps a slot is treated as a vehicle.
+    Uses imgsz=1920 to preserve detail in aerial/top-down parking lot images
+    where cars appear small relative to the full frame. Returns ALL detections
+    regardless of class — the OccupancyDetector uses slot-IoU to decide
+    occupancy, which handles aerial misclassification (cars detected as
+    cell phones, bottles, etc.) automatically.
     """
 
-    # COCO vehicle classes (car, bus, truck, motorcycle)
-    VEHICLE_CLASSES = {2, 3, 5, 7}
-
-    def __init__(self, model_path, conf=0.25):
+    def __init__(self, model_path, conf=0.1, imgsz=1920):
         self.model = YOLO(model_path)
         self.conf  = conf
+        self.imgsz = imgsz
 
     def detect(self, img):
         """
-        Return ALL detections above confidence threshold.
-        Returns list of (x1, y1, x2, y2, class_id, confidence).
-        The occupancy detector decides which ones overlap slots.
+        Run inference and return all bounding boxes above confidence threshold.
+
+        Args:
+            img: numpy array (BGR)
+
+        Returns:
+            list of (x1, y1, x2, y2) int tuples
         """
-        results = self.model(img, verbose=False, conf=self.conf)[0]
-        boxes   = []
-        for box, cls, conf in zip(results.boxes.xyxy, results.boxes.cls, results.boxes.conf):
-            x1, y1, x2, y2 = map(int, box.tolist())
-            boxes.append((x1, y1, x2, y2))
-        return boxes
+        results = self.model(img, verbose=False, conf=self.conf, imgsz=self.imgsz)[0]
+        return [tuple(map(int, box.tolist())) for box in results.boxes.xyxy]

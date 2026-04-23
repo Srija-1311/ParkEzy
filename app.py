@@ -31,7 +31,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs("data/slots", exist_ok=True)
 os.makedirs("static/frames", exist_ok=True)
 
-car_detector = CarDetector("models/yolov8n.pt")
+car_detector = CarDetector("models/yolo11x.pt")
 
 ALLOWED_IMAGE = {'png', 'jpg', 'jpeg'}
 ALLOWED_VIDEO = {'mp4', 'avi', 'mov', 'mkv'}
@@ -46,8 +46,29 @@ def file_ext(filename):
     return filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
 
 
+def normalise_name(name):
+    """Normalise a lot/file name: strip, lowercase, replace spaces with underscores."""
+    return name.strip().lower().replace(' ', '_')
+
+
 def slot_path_for(stem):
     return f"data/slots/{stem}.json"
+
+
+def find_slot_file(name):
+    """
+    Robustly find a slot JSON file for a given name.
+    Tries: exact name, normalised name, original-filename stem.
+    Returns the path if found, else None.
+    """
+    candidates = [
+        slot_path_for(name),
+        slot_path_for(normalise_name(name)),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def get_db():
@@ -84,9 +105,11 @@ def save_slots_route():
     if not polygons:
         return jsonify({"success": False, "error": "No slots provided"}), 400
 
+    # Normalise: spaces → underscores so filenames always match
+    lot_name = normalise_name(lot_name)
     path = slot_path_for(lot_name)
     save_slots(path, polygons)
-    return jsonify({"success": True, "saved": len(polygons), "path": path})
+    return jsonify({"success": True, "saved": len(polygons), "path": path, "lot_name": lot_name})
 
 
 @app.route("/get_slots/<lot_name>")
@@ -110,7 +133,8 @@ def upload():
         if not file or file.filename == "":
             return jsonify({"success": False, "error": "No file uploaded"}), 400
 
-        filename = secure_filename(file.filename)
+        original_filename = file.filename                        # preserve before save
+        filename = secure_filename(original_filename)
         ext      = file_ext(filename)
 
         if ext not in ALLOWED_ALL:
@@ -122,15 +146,19 @@ def upload():
         # lot_name is sent by the frontend when the user typed a name in the
         # "New Parking Lot" field.  If absent, fall back to the image stem.
         lot_name = (request.form.get("lot_name") or "").strip()
-        stem     = filename.rsplit('.', 1)[0]
+        stem          = filename.rsplit('.', 1)[0]           # secure stem
+        original_stem = original_filename.rsplit('.', 1)[0]  # original stem (may have spaces)
 
-        # Priority: explicit lot_name → image stem → UFPR04 default
-        if lot_name and os.path.exists(slot_path_for(lot_name)):
-            use_slots = slot_path_for(lot_name)
-        elif os.path.exists(slot_path_for(stem)):
-            use_slots = slot_path_for(stem)
+        # Priority: explicit lot_name → secure stem → original stem → UFPR04 default
+        # find_slot_file tries both exact and normalised (spaces→underscores) variants
+        if lot_name:
+            use_slots = find_slot_file(lot_name) or DEFAULT_SLOTS
         else:
-            use_slots = DEFAULT_SLOTS
+            use_slots = (
+                find_slot_file(stem) or
+                find_slot_file(original_stem) or
+                DEFAULT_SLOTS
+            )
 
         if ext in ALLOWED_IMAGE:
             return _detect_image(filepath, use_slots)
