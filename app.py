@@ -177,10 +177,34 @@ def upload():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-def _detect_image(filepath, slot_path):
+def _read_image(filepath):
+    """
+    Read an image file robustly.
+    cv2.imread handles JPEG/PNG/BMP/TIFF.
+    Falls back to PIL for modern formats like AVIF, HEIC, WebP.
+    Always returns a BGR numpy array, or None on failure.
+    """
+    import cv2
+    import numpy as np
+
     img = cv2.imread(filepath)
+    if img is not None:
+        return img
+
+    # cv2 failed — try PIL (handles AVIF, HEIC, WebP, etc.)
+    try:
+        from PIL import Image
+        img_pil = Image.open(filepath).convert('RGB')
+        img_np  = np.array(img_pil)
+        return cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
+
+
+def _detect_image(filepath, slot_path):
+    img = _read_image(filepath)
     if img is None:
-        return jsonify({"success": False, "error": "Cannot read image"}), 400
+        return jsonify({"success": False, "error": "Cannot read image — unsupported format or corrupted file"}), 400
 
     slots              = load_slots(slot_path)
     occupancy_detector = OccupancyDetector(slots)
