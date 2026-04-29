@@ -15,17 +15,20 @@ build/
 instance/
 .webassets-cache
 
-# Uploads
-static/uploads/*
-!static/uploads/.gitkeep
-
 # Data
 data/UFPR04/images/
 data/UFPR04/xml/
+data/analytics.db
 data.zip
 
-# Models (optional - uncomment if models are large)
-# models/*.pt
+# Static generated files
+static/frames/
+static/uploads/*
+!static/uploads/.gitkeep
+
+# Models — large files excluded from git
+# Download manually: yolov8n.pt from ultralytics, yolo11x.pt from ultralytics
+models/*.pt
 
 # IDE
 .vscode/
