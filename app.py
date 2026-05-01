@@ -5,12 +5,17 @@ import json
 import sqlite3
 
 import cv2
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import (Flask, render_template, request, jsonify, Response,
+                   stream_with_context, redirect, url_for, flash, session)
+from flask_login import (LoginManager, UserMixin, login_user, logout_user,
+                         login_required, current_user)
+from flask_bcrypt import Bcrypt
 from werkzeug.utils import secure_filename
 
 from src.analytics_db import (
     init_db, log_occupancy, save_frame_data, clear_frame_data,
-    save_slot_utilization, get_slot_utilization
+    save_slot_utilization, get_slot_utilization,
+    create_user, get_user_by_email, get_user_by_id
 )
 from src.detect_cars import CarDetector
 from src.occupancy import OccupancyDetector
@@ -18,6 +23,7 @@ from src.slot_utils import load_slots, save_slots
 from src.visualize import draw_results
 from src.video_processor import process_video_stream
 from src.evaluate import run_evaluation
+from src.auto_slots import auto_detect_slots
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
@@ -25,7 +31,13 @@ init_db()
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER']      = "static/uploads"
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024   # 500 MB
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.config['SECRET_KEY']         = os.environ.get('SECRET_KEY', 'parkezy-dev-secret-2024')
+
+bcrypt       = Bcrypt(app)
+login_manager = LoginManager(app)
+login_manager.login_view      = 'login'
+login_manager.login_message   = 'Please log in to access ParkEzy.'
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs("data/slots", exist_ok=True)
@@ -33,14 +45,30 @@ os.makedirs("static/frames", exist_ok=True)
 
 car_detector = CarDetector("models/yolo11x.pt")
 
-ALLOWED_IMAGE = {'png', 'jpg', 'jpeg'}
+ALLOWED_IMAGE = {'png', 'jpg', 'jpeg', 'webp', 'avif'}
 ALLOWED_VIDEO = {'mp4', 'avi', 'mov', 'mkv'}
 ALLOWED_ALL   = ALLOWED_IMAGE | ALLOWED_VIDEO
 
 DEFAULT_SLOTS = "data/UFPR04/slots.json"
+_eval_cache   = None
 
-_eval_cache = None
 
+# ── Flask-Login user class ────────────────────────────────────────────────────
+
+class User(UserMixin):
+    def __init__(self, user_dict):
+        self.id       = user_dict['id']
+        self.username = user_dict['username']
+        self.email    = user_dict['email']
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    data = get_user_by_id(int(user_id))
+    return User(data) if data else None
+
+
+# ── Helper functions ──────────────────────────────────────────────────────────
 
 def file_ext(filename):
     return filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
@@ -58,7 +86,7 @@ def slot_path_for(stem):
 def find_slot_file(name):
     """
     Robustly find a slot JSON file for a given name.
-    Tries: exact name, normalised name, original-filename stem.
+    Tries exact name and normalised (spaces→underscores) variant.
     Returns the path if found, else None.
     """
     candidates = [
@@ -75,19 +103,84 @@ def get_db():
     return sqlite3.connect("data/analytics.db")
 
 
+# ── Auth routes ──────────────────────────────────────────────────────────────
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('home'))
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        email    = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        confirm  = request.form.get("confirm", "")
+        if not username or not email or not password:
+            flash("All fields are required.", "error")
+        elif password != confirm:
+            flash("Passwords do not match.", "error")
+        elif len(password) < 6:
+            flash("Password must be at least 6 characters.", "error")
+        else:
+            hashed = bcrypt.generate_password_hash(password).decode('utf-8')
+            if create_user(username, email, hashed):
+                flash("Account created! Please log in.", "success")
+                return redirect(url_for('login'))
+            else:
+                flash("Email or username already registered.", "error")
+    return render_template("register.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for('home'))
+    if request.method == "POST":
+        email    = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        user_data = get_user_by_email(email)
+        if user_data and bcrypt.check_password_hash(user_data['password'], password):
+            login_user(User(user_data), remember=True)
+            return redirect(request.args.get('next') or url_for('home'))
+        flash("Invalid email or password.", "error")
+    return render_template("login.html")
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    flash("You have been logged out.", "success")
+    return redirect(url_for('login'))
+
+
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
+@app.route("/home")
+@login_required
+def home():
+    return render_template("home.html")
+
 @app.route("/")
+def index_redirect():
+    if current_user.is_authenticated:
+        return redirect(url_for('home'))
+    return redirect(url_for('login'))
+
+
+@app.route("/detect")
+@login_required
 def index():
     return render_template("index.html")
 
 
 @app.route("/dashboard")
+@login_required
 def dashboard():
     return render_template("dashboard.html")
 
 
 @app.route("/evaluation")
+@login_required
 def evaluation_page():
     return render_template("evaluation.html")
 
@@ -124,9 +217,71 @@ def get_slots_route(lot_name):
     return jsonify({"slots": data})
 
 
+# ── Auto slot detection ───────────────────────────────────────────────────────
+
+@app.route("/api/auto_detect_slots", methods=["POST"])
+@login_required
+def auto_detect_slots_route():
+    """
+    Upload an image or video frame, run YOLO, and return auto-detected
+    slot polygons for user review before saving.
+    """
+    try:
+        file = request.files.get("file")
+        if not file:
+            return jsonify({"success": False, "error": "No file provided"}), 400
+
+        filename = secure_filename(file.filename)
+        ext      = file_ext(filename)
+
+        if ext in ALLOWED_VIDEO:
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            cap = cv2.VideoCapture(filepath)
+            ret, img = cap.read()
+            cap.release()
+            if not ret or img is None:
+                return jsonify({"success": False, "error": "Cannot read video frame"}), 400
+        else:
+            import numpy as np
+            data = file.read()
+            nparr = np.frombuffer(data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is None:
+                from PIL import Image
+                import io as _io
+                img_pil = Image.open(_io.BytesIO(data)).convert('RGB')
+                img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+        if img is None:
+            return jsonify({"success": False, "error": "Cannot read image"}), 400
+
+        boxes = car_detector.detect(img)
+
+        if not boxes:
+            return jsonify({
+                "success": True, "slots": [], "detections": 0,
+                "message": "No vehicles detected. Draw slots manually or try a different image."
+            })
+
+        slots = auto_detect_slots(boxes, img.shape)
+
+        return jsonify({
+            "success":    True,
+            "slots":      slots,
+            "detections": len(boxes),
+            "message":    f"Detected {len(boxes)} vehicles → {len(slots)} slot candidates. Review and adjust, then save."
+        })
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # ── Image upload & detect ─────────────────────────────────────────────────────
 
 @app.route("/upload", methods=["POST"])
+@login_required
 def upload():
     try:
         file = request.files.get("file")
@@ -244,6 +399,7 @@ def _detect_image(filepath, slot_path):
 # ── Video SSE stream ──────────────────────────────────────────────────────────
 
 @app.route("/stream_video")
+@login_required
 def stream_video():
     """
     SSE endpoint. Browser connects here after uploading a video.

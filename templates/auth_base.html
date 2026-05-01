@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}ParkEzy{% endblock %}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',sans-serif;background:#0f1724;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.auth-card{background:#1a2332;border:1px solid #2d3f5a;border-radius:16px;padding:40px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(0,0,0,0.4)}
+.auth-logo{text-align:center;margin-bottom:28px}
+.auth-logo .logo-icon{font-size:2.5rem;display:block;margin-bottom:8px}
+.auth-logo h1{color:#e2e8f0;font-size:1.5rem;font-weight:700;letter-spacing:1px}
+.auth-logo p{color:#64748b;font-size:0.82rem;margin-top:4px}
+.auth-title{color:#e2e8f0;font-size:1.1rem;font-weight:600;margin-bottom:20px;text-align:center}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:0.8rem;color:#94a3b8;margin-bottom:6px;font-weight:500;text-transform:uppercase;letter-spacing:.5px}
+.form-group input{width:100%;padding:11px 14px;background:#0f1724;border:1px solid #2d3f5a;border-radius:8px;color:#e2e8f0;font-size:0.9rem;transition:.2s}
+.form-group input:focus{outline:none;border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.15)}
+.btn-auth{width:100%;padding:12px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;transition:.2s;margin-top:8px}
+.btn-auth:hover{opacity:.9;transform:translateY(-1px)}
+.auth-link{text-align:center;margin-top:20px;font-size:0.85rem;color:#64748b}
+.auth-link a{color:#667eea;text-decoration:none;font-weight:500}
+.auth-link a:hover{color:#764ba2}
+.flash{padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:0.85rem}
+.flash.error{background:rgba(239,68,68,.1);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.flash.success{background:rgba(56,239,125,.1);color:#6ee7b7;border:1px solid rgba(56,239,125,.3)}
+.divider{display:flex;align-items:center;gap:12px;margin:20px 0;color:#2d3f5a;font-size:.8rem}
+.divider::before,.divider::after{content:'';flex:1;height:1px;background:#2d3f5a}
+</style>
+</head>
+<body>
+<div class="auth-card">
+  <div class="auth-logo">
+    <span class="logo-icon">🅿</span>
+    <h1>ParkEzy</h1>
+    <p>Smart Parking Detection System</p>
+  </div>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in messages %}
+      <div class="flash {{ cat }}">{{ msg }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</div>
+</body>
+</html>

@@ -9,6 +9,15 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email    TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            created  TEXT NOT NULL
+        )
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS occupancy_logs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp       TEXT,
@@ -104,3 +113,39 @@ def clear_frame_data():
     conn.execute("DELETE FROM frame_data")
     conn.commit()
     conn.close()
+
+
+# ── User management ───────────────────────────────────────────────────────────
+
+def create_user(username, email, password_hash):
+    from datetime import datetime
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO users (username, email, password, created) VALUES (?,?,?,?)",
+            (username, email, password_hash, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
+def get_user_by_email(email):
+    conn = sqlite3.connect(DB_PATH)
+    row  = conn.execute(
+        "SELECT id, username, email, password FROM users WHERE email=?", (email,)
+    ).fetchone()
+    conn.close()
+    return {"id": row[0], "username": row[1], "email": row[2], "password": row[3]} if row else None
+
+
+def get_user_by_id(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    row  = conn.execute(
+        "SELECT id, username, email FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return {"id": row[0], "username": row[1], "email": row[2]} if row else None
